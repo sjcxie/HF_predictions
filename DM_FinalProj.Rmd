@@ -1,0 +1,684 @@
+---
+title: "Data Mining_Final Project"
+author: "Jinchen Xie, Zhaoyu Qiao, Lihan Hu"
+date: "12/10/2019"
+output: 
+  html_document:
+    theme: paper
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(data.table)
+library(glmnet)
+library(boot)
+library(splines)
+library(gam)
+library(scales)
+library(gridExtra)
+library(magrittr)
+```
+
+# Introduction  
+
+**In this report, we intend to provide business insights for an online greeting card company on identifying high life time value customers and what some characteristics that these customers may have in common.**  
+
+<font color="#157515">
+More specifically, our Key tasks for this project is to:  
+
+Task 1. Develop an attrition model, to predict whether a customer will cancel their subscription in the near future. Characterize your model performance.  
+
+Task 2. Develop a model for estimating the ltv of a customer. Characterize your model performance.  
+
+Task 3. Develop a customer segmentation scheme. Include in this scheme the identification of sleeping customers, those that are no longer active but have not canceled their account.  
+</font>
+
+* To find answer for task 1, we will use classification models that we learned in class. We define the "near future" to be 6 months, since it's a resonable time period to give the company valuable business insight.  
+
+* To perform task 2, we will utilize some regression models
+
+* To solve the problem in task 3, we will use clustering methods to identify hibernating customers.
+
+The original dataset we imported from csv file contains information of 10000 customers'onsite activities over a four-year time period, from 2011-01-01 to 2014-12-31. Each row of the dataset represents one incidence that a customer went onsite. So each customers have different number of rows in the original datasets, ranging from 1 row to 166 rows. One issue of the original dataset is that it doesn't capture the time aspect, namely "near future", that our prediction needs to take into account. So we need to process to data to better capture it.  
+
+## How we processed the data and generated outcome variable
+<font color="#D14BD5">
+
+To generate the dataset that is more suitable for our analysis, we place cutpoints every 180 days (roughly 6 months). We want to know if the customers who were subscribing at the cutpoint still subscribed after 180 days.  So for every cutpoint t, we only retain the customers who have status==1 (are subscribing) at this specific time t. We extract the information of these customers before the cutpoint t, and use these information to generate our features in order to give a prediction of their status in 180 days.  
+
+After processing the data follow the method described above, in our dataset, each row represents a customer's data before a sepcific check point. Each customer can have multiple rows, since the time under subscribing status can span through several checkpoints. Our new dataset has 28837 observations.   
+</font>
+
+<font color="#0000CD">
+**For Task one:**  
+The outcome variable `end` is the status of each customers 180 days (roughly 6 months) after the cutpoint t. We call this "180 days after each checkpoints" variable `check.day`. If the customer already unsubscribed before `check.day`, then we assign `end`=1. Else, if the customer was still subscribing on `check.day`, we assign `end`=0.  
+
+```{r Generate Outcome Variable, cache = TRUE}
+ltv_raw <- read_csv("ltv.csv")
+# Initialize iterator date_i
+date_i = min(ltv_raw$date)+180
+# Initialize the dataframe ltv.1
+ltv.1 <- data.frame(ltv_raw[1,])
+ltv.1 <- cbind(ltv.1, end_cond=c(0))
+ltv.1 <- cbind(ltv.1, end=c(0))
+ltv.1 <- data.frame(ltv.1[0,])
+# 
+while (date_i < as.Date("2014-06-30")){
+    check.date=date_i+180
+    temp.1 <- ltv_raw %>% group_by(id) %>% 
+        filter((min(date)<(date_i)) & (max(date)>(date_i)))
+    temp.1 <- temp.1[-which((temp.1$date>date_i)&(temp.1$status!=2)),]
+    # Generate Outcome variable `END`
+    temp.1 <- cbind(temp.1, end_cond=rep(0,nrow(temp.1)))
+    temp.1 <- cbind(temp.1, end=rep(0,nrow(temp.1)))
+    temp.1 <- cbind(temp.1, check.day=rep(check.date,nrow(temp.1)))
+    for (i in c(1:nrow(temp.1))){
+        if ((temp.1$status[i]==2) & (temp.1$date[i]<as.Date(check.date))){
+            temp.1$end_cond[i] <- 1  
+        }
+    }
+    temp.2a <- temp.1 %>% group_by(id) %>% 
+        dplyr::summarise(end = sum(end_cond))
+
+    temp.2 <- data.frame(temp.1)
+    for (i in c(1:nrow(temp.2))){
+        if (temp.2a$end[which(temp.2a$id == temp.2$id[i])]==1){
+            temp.2$end[i] <- 1
+        }
+    }
+    ltv.1 <- rbind(ltv.1, temp.2)
+    # if we take every 90 days as check points
+    date_i <- date_i+180
+}
+```
+</font>
+ 
+<font color="#A0522D"> 
+**For Task two:**  
+The outcome variable `sub.days` give the total number of days that the customer is under subscribe status (status = 1).  
+</font>
+
+
+```{r, cache=TRUE}
+ltv_raw <- read_csv("ltv.csv")
+# Initialize iterator date_i
+date_i = min(ltv_raw$date)+180
+# Initialize the dataframe ltv.1
+ltv.2 <- data.frame(ltv_raw[1,])
+ltv.2 <- cbind(ltv.2, sub.days=c(0))
+ltv.2 <- data.frame(ltv.2[0,])
+# 
+while (date_i < as.Date("2014-06-30")){
+    # Retain only customers who are active on cutpoint date_i
+    temp.1 <- ltv_raw %>% group_by(id) %>% 
+        filter((min(date)<(date_i)) & (max(date)>(date_i)))
+    # Remove all data after the cutpoint date_i except the date he unsubscribed
+    temp.1 <- temp.1[-which((temp.1$date>date_i)&(temp.1$status!=2)),]
+    # Generate Outcome variable `end.day`
+    temp.1 <- cbind(temp.1, sub.days=rep(0,nrow(temp.1)))
+    temp.1 <- cbind(temp.1, cut.point=rep(date_i,nrow(temp.1)))
+
+    temp.2a <- temp.1 %>% group_by(id) %>% 
+        dplyr::summarise(
+            end.date = dplyr::if_else(any(status==2), as.Date(max(date)), as.Date("2014-12-31")),
+                        sub.days.a = end.date-min(date))
+    
+    temp.2 <- data.frame(temp.1)
+    for (i in c(1:nrow(temp.2))){
+        j <- which(temp.2a$id==temp.2$id[i])
+        temp.2$sub.days[i] <- temp.2a$sub.days.a[j]
+    }
+    ltv.2 <- rbind(ltv.2, temp.2)
+    # if we take every 180 days as check points
+    date_i <- date_i+180
+}
+```
+
+```{r Make a copy of ltv.1}
+# Make a copy of ltv.1
+ltv.1.copy <- data.frame(ltv.1)
+ltv.2.copy <- data.frame(ltv.2)
+```
+
+```{r remove unused dataframes}
+rm(list=c("temp.1","temp.2","temp.2a","i","date_i","check.date"))
+```
+
+## Feature generating
+```{r Generate Features}
+ltv.1 <- ltv.1[-which(ltv.1$date > (ltv.1$check.day-180)),] %>% 
+        group_by(id, gender, check.day, end) %>% 
+        dplyr::summarise(
+                  visit_cnt=n(),
+                  visit_freq = 180/visit_cnt,
+                  visit_interval = as.numeric(max(date) - min(date))/n(),
+                  no_visit_len_lastday = as.numeric(min(check.day- 180 - date)),
+                  sum_onsite_time = sum(onsite),
+                  subs_len=as.numeric(max(check.day- 180 - date)),
+                  avg_onsite = mean(onsite),
+                  avg_pg=mean(pages),
+                  time_on_page=(sum(pages)/sum(onsite)), 
+                  avg_pg_complete = mean(pages[completed == 1]),
+                  avg_pg_entered = mean(pages[entered == 1]),
+                  avg_onsite_time_completed = mean(onsite[completed == 1]),
+                  avg_onsite_time_entered = mean(onsite[entered == 1]),
+                  enter_cnt=sum(entered),
+                  enter_freq = ifelse(enter_cnt == 0,0,180/enter_cnt),
+                  time_per_enter = sum_onsite_time/enter_cnt,
+                  entered_interval = as.numeric((max(date[entered == 1]) - min(date[entered == 1]))/sum(entered)),
+                  completed_cnt=sum(completed), 
+                  completed_freq = ifelse(completed_cnt == 0,0,180/completed_cnt),
+                  completed_interval = as.numeric((max(date[completed == 1])- min(date[completed == 1]))/sum(completed)),
+                  comp_enter_ratio = completed_cnt/enter_cnt,
+                  holiday_cnt=sum(holiday),
+                  holiday_freq = ifelse(holiday_cnt == 0,0,180/holiday_cnt),
+                  holiday_interval = ifelse(holiday_cnt == 0,0,
+                                            as.numeric(max(date[holiday == 1]) - min(date[holiday ==1]))/sum(holiday)),
+                  holiday_enter_ratio = holiday_cnt/enter_cnt )
+
+```
+
+```{r}
+ltv.2 <- ltv.2[-which(ltv.2$date > (ltv.2$cut.point)),] %>% 
+        group_by(id, gender, cut.point, sub.days) %>% 
+        dplyr::summarise(
+                  visit_cnt=n(),
+                  visit_freq = 180/visit_cnt,
+                  visit_interval = as.numeric(max(date) - min(date))/n(),
+                  no_visit_len_lastday = as.numeric(min(cut.point - date)),
+                  sum_onsite_time = sum(onsite),
+                  subs_len=as.numeric(max(cut.point - date)),
+                  avg_onsite = mean(onsite),
+                  avg_pg=mean(pages),
+                  time_on_page=(sum(pages)/sum(onsite)), 
+                  avg_pg_complete = mean(pages[completed == 1]),
+                  avg_pg_entered = mean(pages[entered == 1]),
+                  avg_onsite_time_completed = mean(onsite[completed == 1]),
+                  avg_onsite_time_entered = mean(onsite[entered == 1]),
+                  enter_cnt=sum(entered),
+                  enter_freq = ifelse(enter_cnt == 0,0,180/enter_cnt),
+                  time_per_enter = sum_onsite_time/enter_cnt,
+                  entered_interval = as.numeric(max(date[entered == 1]) - min(date[entered == 1]))/sum(entered),
+                  completed_cnt=sum(completed), 
+                  completed_freq = ifelse(completed_cnt == 0,0,180/completed_cnt),
+                  completed_interval = as.numeric(max(date[completed == 1])- min(date[completed == 1]))/sum(completed),
+                  comp_enter_ratio = completed_cnt/enter_cnt,
+                  holiday_cnt=sum(holiday),
+                  holiday_freq = ifelse(holiday_cnt == 0,0,180/holiday_cnt),
+                  holiday_interval = ifelse(holiday_cnt == 0,0,
+                                            as.numeric(max(date[holiday == 1]) - min(date[holiday ==1]))/sum(holiday)),
+                  holiday_enter_ratio = holiday_cnt/enter_cnt)
+```
+
+The feature that we generated include:  
+`r names(ltv.1)[-c(1:4)]`  
+  
+# Exploratory Data Analysis
+
+## Explore variables vs outcome variables `end`
+```{r}
+g1 <- ggplot(data=ltv.1, aes(x=avg_onsite,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= c(5,10,15,20,25,30,35,40,50))
+g2 <- ggplot(data=ltv.1, aes(x=visit_cnt,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,160,20))
+g3 <- ggplot(data=ltv.1, aes(x=completed_cnt,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,160,20))
+g4 <- ggplot(data=ltv.1, aes(x=completed_freq,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,160,20))
+g5 <- ggplot(data=ltv.1, aes(x=completed_interval,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,160,20))
+g6 <- ggplot(data=ltv.1, aes(x=gender,fill=as.factor(end)))+geom_bar(position="fill")
+g7 <- ggplot(data=ltv.1, aes(x=avg_pg,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,50,1))
+g8 <- ggplot(data=ltv.1, aes(x=holiday_cnt,fill=as.factor(end)))+geom_histogram(position="fill",binwidth=5)+scale_x_continuous(breaks= seq(0,50,5))
+grid.arrange(g1,g2,nrow=2)
+grid.arrange(g3,g4,nrow=2)
+grid.arrange(g5,g6,nrow=2)
+grid.arrange(g7,g8,nrow=2)
+```
+
+<font color="#0000CD"> 
+From these plots we can see that some of the variables like completed_interval seems to be a good predictor of whether the customer unsubscribed in 6 months. But for variabes like visit_cnt, completed_cnt, the relationships are hard to tell.  
+</font>
+
+## Explore variables vs outcome variable `sub_days`
+```{r}
+g1 <- ggplot(data=ltv.2, aes(x=gender,y=sub.days,color=gender))+geom_point()
+g2 <- ggplot(data=ltv.2, aes(x=visit_cnt,y=sub.days))+geom_point()
+g3 <- ggplot(data=ltv.2, aes(x=sum_onsite_time,y=sub.days))+geom_point()
+g4 <- ggplot(data=ltv.2, aes(x=completed_freq,y=sub.days))+geom_point()
+g5 <- ggplot(data=ltv.2, aes(x=holiday_enter_ratio,y=sub.days))+geom_point()
+g6 <- ggplot(data=ltv.2, aes(x=completed_interval,y=sub.days))+geom_point()
+grid.arrange(g1,g2,nrow=2)
+grid.arrange(g3,g4,nrow=2)
+grid.arrange(g5,g6,nrow=2)
+```
+
+<font color="#8B008B"> 
+We can clearly see a relationship between visit_cnt and sub.days. The more visit_cnt there are, the longer the subscribtion days there will be. Which is intuitive.  
+Similarly, a clear relationship between sum_onsite_time and sub.days. However, we suspect that this variable is correlated with the `visit_cnt` based on the shape of the plot. We will examine their correlations later.   
+</font>
+
+
+We would like to examine the correlation betweeen these variables:  
+**Correlation Matrix** 
+```{r}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+} #Reference: Data Mining HW1 Code
+# correlation matrix of all quantitative variables except y00.children
+pairs(~visit_cnt + holiday_freq + completed_freq + sum_onsite_time + holiday_enter_ratio + completed_interval, data = ltv.2, lower.panel = panel.cor)
+```
+<font color="#8B4513"> 
+As shown in the correlation matrix, we found that `visit_cnt` and `sum_onsite_time` are highly correlated, so we wouldn't want to include both of them in a regression model. The other one to notice is `holiday_enter_ratio` and `completed_interval`,  
+</font>
+
+<font color="#008000"> 
+Note on proportion of unsubscribed and subscribe customer.
+Among the `r nrow(ltv.1)` observations we have in the dataset, `r round(nrow(filter(ltv.1, end==1))/nrow(ltv.1),4)*100`% of the observations are customers unsubscribed in 180 days after the checkpoint (have label `end=1`), `r 100-round(nrow(filter(ltv.1, end==1))/nrow(ltv.1),4)*100`% have label `end=0`, which is a little bit unbalance but acceptable. This means if the model choose to predict all end=0, then it will acheive roughly 83.56% accuracy. So we expected to acheive an accuracy higher than this for our classification probalem in task 1.  
+</font>
+
+# Methodology
+
+```{r}
+# Generate Training set and Test set
+set.seed(1)
+train.index <- sample(c(1:nrow(ltv.1)), round(nrow(ltv.1)*0.8))
+train.1 <- ltv.1[train.index,]
+test.1 <- ltv.1[-train.index,]
+train.2 <- ltv.2[train.index,]
+test.2 <- ltv.2[-train.index,]
+```
+
+<font color="#800080"> 
+Before we proceed to train any model, we first split our data randomly into two datasets: train and test.  
+We randomly selected 80% of our data into training set, and the rest 20% into test set.  
+The following models are trained using the training set and final comparisons of misclassification rates, test MSEs are based on model performance on test data.  
+</font>
+
+`r round(nrow(filter(train.1, end==1))/nrow(train.1),4)*100`% of our training data have label `end=1` and the rest `r 100-round(nrow(filter(train.1, end==1))/nrow(train.1),4)*100`% have label `end=0`.  
+
+## Models we experimented with for TASK 1  
+### Logistic Regression
+```{r}
+glm.fit <- glm(end~., data=train.1, family=binomial)
+# use a probability cutoff of 0.5
+glm.probs <- predict(glm.fit,test.1, type="response")
+glm.pred <- rep(0,length(glm.probs))
+glm.pred[glm.probs>0.5]=1
+tab.test.reg <- table(glm.pred, test.1$end)
+tab.test.reg
+# Misclassification rate
+test.mis.reg <- sum(tab.test.reg[row(tab.test.reg)!=col(tab.test.reg)])/nrow(test.1)
+```
+
+Misclassification rate for our logistic regression model is  `r round(test.mis.reg*100,2)`%.     
+
+
+**If we use Step function with glm:**  
+```{r}
+glm.fit.step <- step(glm.fit)
+glm.probs.step <- predict(glm.fit.step,test.1, type="response")
+glm.pred.step <- rep(0,length(glm.probs.step))
+glm.pred.step[glm.probs.step>0.5]=1
+table(glm.pred.step, test.1$end)
+summary(glm.fit.step)
+
+tab.test.reg.2 <- table(glm.pred.step, test.1$end)
+tab.test.reg.2
+# Misclassification rate
+test.mis.reg.2 <- sum(tab.test.reg.2[row(tab.test.reg.2)!=col(tab.test.reg.2)])/nrow(test.1)
+```
+
+Misclassification rate for our step logistic regression model is  `r round(test.mis.reg.2*100,2)`%, which is not better than the logistic regression without using step function.     
+
+<font color="#D14BD5">
+**Histogram of the estimated probabilities from logistic regression**  
+</font>
+```{r}
+glm.probs <- data.frame(test.1$end, glm.probs)
+ggplot(data=glm.probs, aes(x=glm.probs))+geom_histogram(bins=40,aes(fill=as.factor(test.1$end)))+labs(x="estimated probabilies from logistic regression",fill="end")
+```
+
+### Additive Logistic Regression  
+```{r}
+ltv.logit <- glm(as.factor(end)~., data=train.1, family=binomial)
+kable(summary(ltv.logit)$coefficients,digits = 2,format="html")
+```
+
+**The table shows that variables `avg_pg`,`completed_interval`,`holiday_cnt`,`holiday_interval`,`gender` have statistically significant estimates, which agree with the plots we had in the previous "Exploratory Data Analysis" section.**  
+
+```{r}
+ltv1.gam <- gam(end ~ gender+s(visit_cnt,4)+s(visit_freq,4)+s(visit_interval,4)+s(avg_pg,4)+s(completed_interval,4)+s(holiday_cnt,4)+s(holiday_freq,4)+s(holiday_enter_ratio,4), data=train.1, family = binomial)
+
+
+par(mfrow=c(3,3))
+plot(ltv1.gam, col="ForestGreen")
+```
+
+**It seems like many of them are non-linear.**  
+
+
+```{r}
+gam.probs <- predict(ltv1.gam,test.1, type="response")
+gam.pred <- rep(0,length(gam.probs))
+gam.pred[gam.probs>0.5]=1
+tab.test.gam <- table(gam.pred, test.1$end)
+tab.test.gam
+# Misclassification rate
+test.mis.gam <- sum(tab.test.gam[row(tab.test.gam)!=col(tab.test.gam)])/nrow(test.1)
+```
+
+Misclassification rate for our additive logistic regression model is  `r round(test.mis.gam*100,2)`%. which is larger than our previous logistic regression model.    
+
+
+```{r}
+glm.probs <- predict(glm.fit,test.1,type="response")
+glm.pred <- rep(0,length(glm.probs))
+glm.pred[glm.probs>0.5]=1
+
+```
+
+### LDA
+### QDA
+### Random Forest
+### KNN
+### Decision Tree (Bootstrap)
+
+## Models we experimented with for TASK 2 
+### LASSO for variable selection
+```{r}
+train.2 <- train.2[,-which(names(train.2)=="cut.point")]
+ltv2.x <- model.matrix(sub.days~., train.2)[,-1] 
+ltv2.y <- train.2$sub.days
+```
+
+```{r}
+ltv2.lasso <- glmnet(x=ltv2.x, y=ltv2.y)
+```
+
+We have `r length(ltv2.lasso$lambda)` lambda values for model fits.  
+
+For the lambda = `r ltv2.lasso$lambda[5]`:  
+There are `r length((coef(ltv2.lasso, s = ltv2.lasso$lambda[5])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[5])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(ltv2.lasso, s = ltv2.lasso$lambda[5])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[5])@i]`.  
+
+For the lambda = `r ltv2.lasso$lambda[25]`:  
+There are `r length((coef(ltv2.lasso, s = ltv2.lasso$lambda[25])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[25])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(ltv2.lasso, s = ltv2.lasso$lambda[25])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[25])@i]`.  
+
+For the lambda = `r ltv2.lasso$lambda[30]`:  
+There are `r length((coef(ltv2.lasso, s = ltv2.lasso$lambda[30])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[30])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(ltv2.lasso, s = ltv2.lasso$lambda[30])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[30])@i]`.  
+
+Here is the regularization plot:  
+```{r}
+plot(ltv2.lasso, xvar="norm", label=TRUE, ylim=c(-800,800))
+```
+
+As we can see, the model gets more complex as we add more variables in the model.  
+
+In order to choode the lambda that has the smallest CV-error, we plot a CV-error plot.  
+```{r}
+ltv2.lasso.cv <- cv.glmnet(ltv2.x, ltv2.y)
+plot(ltv2.lasso.cv)
+```
+
+The smallest cv-error lambda is `r ltv2.lasso.cv$lambda.min`. Using 1 standard error rule, the 1-se lambda is `r ltv2.lasso.cv$lambda.1se`.  
+However, using the lambda under 1 standard error rule, the model will have no variable other than intercept. So, we choose lambda=2, which is close to the 1-se lambda.  
+Then, we choose 2 predictors that have non-zero estimates besides intercept.  
+Namely, the variables chosen are `r (coef(ltv2.lasso, s = ltv2.lasso$lambda[2])@Dimnames[[1]][-1])[coef(ltv2.lasso, s = ltv2.lasso$lambda[2])@i]`  
+
+### Smoothing Spline  
+```{r}
+smoothCV <- function(x, y, K = 10, df.min = 1, df.max = 10) {
+  set.seed(1)
+  # obs: dataframe of observations (x,y)
+  # size: a length K vector giving the sizes of each fold
+  # folds: vector of vectors, contains index of each fold
+  # folds[[i]]: index of observations in each fold
+  # mse.poly: a length K vector giving the mse of polynomial regression for each fold under specific df
+  # mse.cubic: a length K vector giving the mse of cubic spline for each fold under specific df
+  # mse.smooth: a length K vector giving the mse of smoothing spline for each fold under specific df
+  # cv: a vector of length 3 giving the cv estimates for 3 methods under specific df
+  obs <- data.frame(x,y)
+  size <- c()
+  folds <- c()
+  cv <- data.frame(matrix(ncol = 3))
+  colnames(cv) <- c("df", "method","cv.error")
+  # Dividing the set of observations (x,y) into K groups of approximately equal size
+  for (i in 1:K){
+    size[i] <- floor(length(y)/K)
+  }
+  for (i in 1:(length(y) - size[1]*K)){
+    size[i] <- size[i] + 1
+  }
+  for (i in 1:K){
+    folds[[i]] <- sample(length(y), size[i])
+  }
+  # for each df in [df.min, df.max], we perform cv for 3 methods
+  j <- 1      # j should be the number of degree of freedom we use
+  for (d_f in df.min:df.max){
+    mse.poly <- c()
+    mse.cubic <- c()
+    mse.smooth <- c()
+    # Use fold i as the test set 
+    for (i in 1:K){
+      # Create a subset as training set
+      train <- c(1:length(y))[-folds[[i]]]
+      # Perform three methods of fitting
+      poly.fit <- lm(y ~ poly(x, degree = d_f), data = obs, subset = train)
+      if (d_f >= 3){
+         cubic.fit <- lm(y ~ bs(x, df = d_f), data = obs, subset = train)
+      }
+      if (d_f >= 2){
+        smooth.fit <- smooth.spline(x[train], y[train], df = d_f)
+      }
+      # Calculate the mse for each model for the test set
+      mse.poly[i] <- with(data = obs, mean((y - predict(poly.fit, obs))[-train]^2))
+      if (d_f < 3){
+        mse.cubic[i] <- 0
+      }else {
+        mse.cubic[i] <- with(data = obs, mean((y - predict(cubic.fit, obs))[-train]^2))
+      }
+      if (d_f < 2){
+        mse.smooth[i] <- 0
+      }else{
+        mse.smooth[i] <- with(data = obs, mean((y - predict(smooth.fit, obs$x)$y)[-train]^2))
+      }
+    }
+    sum_poly <- 0
+    sum_cubic <- 0
+    sum_smooth <- 0
+    for (i in 1:K){
+      sum_poly <- sum_poly + size[i]*mse.poly[i]
+      sum_cubic <- sum_cubic + size[i]*mse.cubic[i]
+      sum_smooth <- sum_smooth + size[i]*mse.smooth[i]
+    }
+    cv[j,] <- c(d_f, "poly", round(sum_poly/length(y), digits = 1))
+    if (sum_cubic == 0){
+      cv[j+1,] <- c(d_f, "cubic.spline", "NA")
+    }else{
+      cv[j+1,] <- c(d_f, "cubic.spline", round(sum_cubic/length(y), digits = 1))
+    }
+    if (sum_smooth == 0){
+      cv[j+2,] <- c(d_f, "smoothing.spline", "NA")
+    }else{
+      cv[j+2,] <- c(d_f, "smoothing.spline", round(sum_smooth/length(y), digits = 1))
+    }
+    j <- j + 3
+  }
+  cv
+}
+```
+
+```{r}
+plot.smoothCV <- function(smoothcv.err, K, title.text = "", y.scale.factor = NULL) {
+  smoothcv.err <- smoothcv.err %>% 
+      mutate(df = as.numeric(df))
+  # Replace "NA" in cv.error column by 0
+  smoothcv.err$cv.error[which(smoothcv.err$cv.error=="NA")]=0
+  smoothcv.err <- mutate(smoothcv.err, cv.error = as.numeric(cv.error))
+  # x-axis: degree of freedom
+  # y-axis: K-fold cv error
+  if (is.null(y.scale.factor)==FALSE){
+    lower <- min(filter(smoothcv.err,cv.error>0)$cv.error)
+    upper <- y.scale.factor * lower
+    ggplot(data = filter(smoothcv.err, cv.error>0), aes(x = df, y = cv.error, group = method, color = method)) + geom_point() + geom_line() + ylim(lower, upper) + scale_x_continuous(breaks= pretty_breaks()) + labs(title = title.text)
+  } else {
+    ggplot(data = filter(smoothcv.err, cv.error>0), aes(x = df, y = cv.error, group = method, color = method)) + geom_point() + geom_line() + scale_x_continuous(breaks= pretty_breaks())+ labs(title = title.text)
+  }
+}
+```
+
+**Based on our result from LASSO, we would like to examine the relationship between variables `visit_cnt`,`holiday_cnt` and the outcome variable `sub.days` respectively. Also, we would like to add in a little bit more variable (`gender`,`completed_freq`,`holiday_freq`) (chosen with lambda=25 in LASSO) to see if more variables result in better model.**    
+
+```{r,cache=TRUE}
+ltv2.visit_cnt.err <- with(train.2, smoothCV(x=visit_cnt, y=sub.days, K=50, 1,10))
+ltv2.holiday_cnt.err <- with(train.2, smoothCV(x=holiday_cnt, y=sub.days, K=50, 1,10))
+ltv2.com_freq.err <- with(train.2, smoothCV(x=completed_freq, y=sub.days, K=50, 1,10))
+ltv2.hol_freq.err <- with(train.2, smoothCV(x=holiday_freq, y=sub.days, K=50, 1,10))
+```
+
+```{r}
+ltv2.visit_cnt.plot <- plot.smoothCV(ltv2.visit_cnt.err, 10, "sub.days ~ visit_cnt cross-validation plot",)
+ltv.2.holiday_cnt.plot <- plot.smoothCV(ltv2.holiday_cnt.err, 10, "sub.days ~ holiday_cnt cross-validation plot")
+ltv.2.com_freq.plot <- plot.smoothCV(ltv2.com_freq.err, 10, "sub.days ~ completed_freq cross-validation plot",1.5)
+ltv.2.hol_freq.plot <- plot.smoothCV(ltv2.hol_freq.err, 10, "sub.days ~ holiday_freq cross-validation plot",1.5)
+ltv2.visit_cnt.plot
+ltv.2.holiday_cnt.plot
+ltv.2.com_freq.plot
+ltv.2.hol_freq.plot
+```
+
+**Based on the plots, we want to select models to fit an additive model.**  
+<font color="#157515">
+For sub.days vs `visit_cnt` model selection, it seems like cubic spline with df=5 has the smallest cv.  
+For sub.days vs `holiday_cnt` model selection, it seems like smoothing spline with df=10 has the smallest cv.  We pike smoothing spline since comparing to the other two, it seems to have a constant decreasing trend.  
+For sub.days vs `completed_freq` model selection, it seems like cubic spline with df=4 has the smallest cv. And the cv.error starts to increase after that.  
+For sub.days vs `holiday_freq` model selection, it seems like cubic spline with df=5 has the small  cv. Although it's not the smallest in the graph, further increasing the complexity of the model doesn't seem to improve very much.      
+</font>
+
+```{r}
+ltv2.gam <- gam(sub.days ~ bs(x=visit_cnt, 5) + s(holiday_cnt, df = 10) + bs(x = completed_freq, 4) + bs(x=holiday_freq, 5) + gender, data = train.2)
+ltv2.gam.2 <- gam(sub.days ~ bs(x=visit_cnt, 5) + s(holiday_cnt, df = 10), data = train.2)
+```
+So we used the gam model: `gam(sub.days ~ bs(x=visit_cnt, 5) + s(holiday_cnt, df = 10) + bs(x = completed_freq, 4) + gender)`  
+
+Deviance of the gam model is `r 1-ltv2.gam$deviance / ltv2.gam$null.deviance`
+
+```{r}
+pr.gam <- predict(ltv2.gam, test.2)
+mse.gam.sum <- 0
+for (i in c(1:nrow(test.2))){
+    mse.gam.sum <- mse.gam.sum+(pr.gam[i] - test.2$sub.days[i])^2
+}
+mse.gam <- mse.gam.sum/nrow(test.2)
+
+pr.gam.2 <- predict(ltv2.gam.2, test.2)
+mse.gam.sum.2 <- 0
+for (i in c(1:nrow(test.2))){
+    mse.gam.sum.2 <- mse.gam.sum.2+(pr.gam.2[i] - test.2$sub.days[i])^2
+}
+mse.gam.2 <- mse.gam.sum.2/nrow(test.2)
+```
+
+The test mse of the gam model with 5 variables `visit_cnt`,`holiday_cnt`,`gender`,`holiday_freq`,`completed_freq` is `r mse.gam`.  
+The test mse of the gam model with only 2 variables `visit_cnt`,`holiday_cnt`, suggested by LASSO smallest cv error lambda, is `r mse.gam.2`.  
+It seems like the test MSE is improved by adding three more variables `holiday_freq` adn `completed_freq` and `gender`.  
+
+
+### GLM  
+```{r}
+test.2 <- test.2[,-which(names(test.2)=="cut.point")]
+ltv2.glm.fit <- glm(sub.days~., data=train.2)
+coef.tab.ltv2.glm <- coef(summary(ltv2.glm.fit))
+```
+
+The predictors that have statistically significant coefficient estimates are:  
+`r coef.tab.ltv2.glm[which(abs(coef.tab.ltv2.glm[,"Pr(>|t|)"])<0.05), 0]`.  
+There are 16 variables in this list. And notice that the variables we selected using LASSO `holiday_cnt`, `visit_cnt`, `holiday_freq`, `completed_freq`, `gender` are all in this list.    
+
+We try to only use these 5 variables in the glm model:  
+```{r}
+ltv2.glm.fit.2 <- glm(sub.days~holiday_cnt+visit_cnt+holiday_freq+completed_freq+gender, data=train.2)
+coef.tab.2 <- coef(summary(ltv2.glm.fit.2))
+kable(coef.tab.2, digit=2, format="html")
+```
+
+<font color="#D14BD5">
+We see that all these 5 variables have highly significant coefficient estimates.   
+</font>
+
+
+**Estimated test error using Cross-validation:**  
+```{r, cache=TRUE}
+glm.cv.error <- boot::cv.glm(train.2, ltv2.glm.fit, K=10)$delta[1]
+glm.cv.error.2 <- boot::cv.glm(train.2, ltv2.glm.fit.2, K=10)$delta[1]
+```
+
+Then, we use cross-validation with 10 folds to get the test error of the glm model.   
+The CV estimated test error of our two glm models are `r glm.cv.error` and `r glm.cv.error.2`.   
+As we can see only use 5 variables in glm doesn't perform well. So we decide to stick with the full GLM model.  
+
+**The real test mse:**  
+```{r}
+pr.lm <- predict(ltv2.glm.fit, test.2)
+mse.glm.sum <- 0
+for (i in c(1:nrow(test.2))){
+    mse.glm.sum <- mse.glm.sum+(pr.lm[i] - test.2$sub.days[i])^2
+}
+mse.glm <- mse.glm.sum/nrow(test.2)
+```
+
+
+Using GLM model with all variables the test MSE is `r mse.glm`, which is better than our gam model's test MSE (`r mse.gam`).  
+
+<font color="#D14BD5">
+We see that all these 5 variables have highly significant coefficient estimates.   
+</font>
+
+
+## Models we experimented with for TASK 3 
+
+
+## Final Models Picked
+For task 2, our final model picked based on the lowest test MSE is the GLM model fitted using all features. Our final findings about task 2 will be based on this model.  
+Comparison of test MSE:  
+```{r}
+mse.compare <- data.frame("GAM 5 variables"=mse.gam, "GAM 2 variables"=mse.gam.2, "GLM"=mse.glm)
+kable(mse.compare,format="html")
+```
+
+
+# Key Findings, Main Takeaways
+
+<font color="#C71585">
+For Task 2 prediction, the predictors that have statistically significant coefficient estimates are:
+`r coef.tab.ltv2.glm[which(abs(coef.tab.ltv2.glm[,"Pr(>|t|)"])<0.05), 0]`. And there are 16 of them. To estimate a customer's life time value, we would feed that customer's information to the glm model, and get an outcome variable `sub.days`, which is the estimated subscription length of that customer. If we divide this number by 30 (# of days in a month), since we the company adopts $1 monthly subscription fee, we will get the customer's estimated life time value.     
+</font>
+
+```{r}
+customer.i <- predict(ltv2.glm.fit, test.2[100,])
+```
+<font color="#C71585">
+For example, if we pick the 100th customer from our test set, and make a prediction of his/her subsciption days, we get number `r customer.i`. From this we compute the life time value for this cutomer is `r round(customer.i/30,1)`. And the real life time value for this customer is `r  round(test.2[100,]$sub.days/30,1)`.  
+</font>
+
+```{r}
+sample.index <- sample(c(1:nrow(test.2)), round(nrow(test.2)*0.3))
+sample.test.2 <- test.2[sample.index,]
+pred.ltv <- predict(ltv2.glm.fit,sample.test.2)
+find.test.2 <- cbind(sample.test.2, pred.ltv)
+ggplot(data=find.test.2, aes(x=id))+geom_point(aes(y=pred.ltv/30,color=I("blue")))+geom_point(aes(y=sub.days/30, color=I("pink")))+labs(y="Life Time Value", x="customer id")
+```
+
+<font color="#C71585">
+This plot show our predicted customers' ltv and their real ltv using 30% random sampled test data. Pink points represent the true customer ltv, and Blue points represent our predicted customer ltv.  
+As we can see a large portion of them are overlapped. But we also find that our predicted customer ltv can be higher than the true customer ltv in general. This may because of our cut of training data and test data, and our model of choice. So we would like to advise the company to acknowledge that our model is likely to overestimate customer's ltv.  
+</font>

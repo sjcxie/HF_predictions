@@ -311,7 +311,7 @@ The following models are trained using the training set and final comparisons of
 ```{r}
 glm.fit <- glm(end~., data=train.1, family=binomial)
 # use a probability cutoff of 0.5
-glm.probs <- predict(glm.fit,test.1, type="response")
+glm.probs <- predict(glm.fit, test.1, type="response")
 glm.pred <- rep(0,length(glm.probs))
 glm.pred[glm.probs>0.5]=1
 tab.test.reg <- table(glm.pred, test.1$end)

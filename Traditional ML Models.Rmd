@@ -4,7 +4,7 @@ author: "Jinchen Xie"
 date: "07/27/2020"
 output: 
   html_document:
-    theme: paper
+    theme: cerulean
     highlight: tango
     toc: true
     toc_depth: 3
@@ -17,17 +17,235 @@ output:
 knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
 library(knitr)
 library(tidyverse)
-library(data.table)
-# library(glmnet)
+library(Hmisc)
+library(caret)
+library(glmnet)
+# library(data.table)
 # library(boot)
 # library(scales)
 # library(gridExtra)
 ```
 
-```{r}
+# Model setup
+
+## Import Data
+```{r Import Data}
 baseline.1 <- readxl::read_excel("/Users/jinchenxie/Desktop/datasets/processed/All Baseline Attributes combined.xlsx")
+gbtm.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/combined 7 labs data.xlsx')
+
+# df contains only the sub-cohort of patients satisfied the lab measurements criteria.
+df <- baseline.1[which(baseline.1$rID %in% gbtm.df$patients_id),]
+
+rm(baseline.1, gbtm.df)
+```
+
+
+## Data Preprocessing
+We want to include the same set of attributes that are considered in the GBTM model prediction. 
+
+```{r Generate lists of attributes}
+attris.df <- df %>% select("rID", "AGE_ADMISSION", "FEMALE", "RACE_White", starts_with("TOBACCO_"), starts_with("INSUR_"), starts_with("BP_"), "PULSE", "BMI", ends_with("_HST"), starts_with("HX_"), starts_with("PRIOR_"),  "CCI_TOTAL_SCORE", starts_with("CCI_"), ends_with("_CARDIOMYOPATHY"), ends_with("_00"), "CTB", ends_with("_CTB"), total_adms, Corrected_Followup_Days)
+
+# Remove attributes that no patients had it as 1
+no.patient.attris <- c("PRIOR_STERNOTOMY", "TOBACCO_STATUS_LABEL", "VIRAL_CARDIOMYOPATHY", "TZD_00", "GLP1_00", "SULFONYLUREA_00")
+for (var in no.patient.attris){
+  attris.df[[var]] <- NULL
+}
+rm(no.patient.attris, var)
+
+nu.list <- c("AGE_ADMISSION", "CCI_TOTAL_SCORE", "BP_SYSTOLIC", "BP_DIASTOLIC", "PULSE", "BMI")
+labels.list <- colnames(attris.df)[(dim(attris.df)[2]-7):dim(attris.df)[2]]
+binary.list <- colnames(attris.df)[-1]
+binary.list <- binary.list[(!binary.list %in% nu.list) & (!binary.list %in% labels.list)]
+attris.list <- c(nu.list, binary.list)
+
+rm(attris.df)
+```
+
+
+
+- The set of continuous, numeric attributes includes: `r nu.list`  
+
+- The set of binary attributes include: `r binary.list`  
+
+- The set of outcomes includes: `r labels.list[1:6]`  
+
+
+
+
+
+### Avoid using highly correlated variables
+
+Correlations > 0.5:  
+```{r generate correlations table}
+temp.df <- df %>% select(attris.list)
+rcor1 <- rcorr(as.matrix(temp.df))
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+corr.df <- flattenCorrMatrix(rcor1$r, rcor1$P)
+
+corr.df.5 <- corr.df[which(corr.df$cor > 0.5),]
+corr.df.7 <- corr.df[which(corr.df$cor > 0.7),]
+# corr.list <- union(corr.df.7$row, corr.df.7$column)
+corr.df.5
+rm(rcor1, corr.df.5, corr.df.7)
+```
+
+```{r eval=FALSE}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+corr.df <- ctb.df %>% select(corr.list)
+pairs(~., data = corr.df, lower.panel = panel.cor)
+rm(corr.list, corr.df)
+```
+
+Variables to remove due to high correlations:  
+CCI_CHF, CCI_COPD, CCI_DM_NO_CC
+```{r remove variables}
+# remove variables
+rm.attris <- c("CCI_CHF", "CCI_COPD", "CCI_DM_NO_CC")
+for (var in rm.attris){
+  df[[var]] <- NULL
+}
+attris.list <- attris.list[!attris.list %in% rm.attris]
+rm(rm.attris, var)
+```
+```{r Generate set of data.frames}
+# Generate 6 dataframes based on different variable as label
+ctb.df <- df %>% select(attris.list, "CTB")
+in.ctb.df <- df %>% select(attris.list, "in_CTB")
+ctb.30.df <- df %>% select(attris.list, "30_day_CTB")
+ctb.60.df <- df %>% select(attris.list, "60_day_CTB")
+ctb.90.df <- df %>% select(attris.list, "90_day_CTB")
+ctb.1yr.df <- df %>% select(attris.list, "1_year_CTB")
+```
+
+### Check class bias
+```{r eval=FALSE, echo=TRUE}
+table(ctb.df$CTB)
+table(in.ctb.df$in_CTB)
+table(ctb.30.df$`30_day_CTB`)
+table(ctb.60.df$`60_day_CTB`)
+table(ctb.90.df$`90_day_CTB`)
+table(ctb.1yr.df$`1_year_CTB`)
+```
+
+
+
+
+
+
+
+
+
+# Logistic Regression
+
+*All-cause CTB as label:  *
+
+Split into train and test sets:  
+```{r train test split}
+smp_size <-  floor(0.75*nrow(ctb.df))
+set.seed(123)
+train.ind <- sample(seq_len(nrow(ctb.df)),size = smp_size)
+train <- ctb.df[train.ind, ]
+test <- ctb.df[-train.ind, ]
+```
+There are `r nrow(train)` samples in training set, and `r nrow(test)` samples in test set. 
+
+## No Regularization
+
+**Based on trials with setting small set of variables as predictors (instead of univariate model), we get the following variables have significant p-value (<0.1).**  
+AGE_ADMISSION, FEMALE, RACE_White, CCI_TOTAL_SCORE, BP_DIASTOLIC, TOBACCO_Never, INSUR_Commercial, INSUR_Medicare, DIAB_HST, COPD_HST, CAD_HST, VASCULARDISEASE_HST, CKD_HST, ESRD_HST, PRIOR_CABG, PRIOR_SMVR, CCI_RENAL_DISEASE, CCI_MI, CCI_DM_WITH_CC, CCI_PERIPHERAL_VASC, ISCHEMIC_CARDIOMYOPATHY, ASA_00, NOAC_00, APT_00, ACE_ARB_00, AAD_CLASS_I_00, INSULIN_00, METFORMIN_00
+
+**STarting with all the variables above, removing variables with p-value < 0.05 one by one. The following set of variables are statistically significant predictors at 0.05 level.**  
+AGE_ADMISSION, FEMALE, RACE_White, BP_DIASTOLIC, INSUR_Commercial, COPD_HST, PRIOR_CABG, CCI_RENAL_DISEASE, CCI_PERIPHERAL_VASC, NOAC_00, INSULIN_00, METFORMIN_00
+
+```{r}
+ctb.glm.fit1 <- glm(CTB ~ AGE_ADMISSION + RACE_White + BP_DIASTOLIC + TOBACCO_Never + INSUR_Commercial + CCI_RENAL_DISEASE + CCI_PERIPHERAL_VASC + NOAC_00 + ACE_ARB_00 + INSULIN_00, data = train, family = binomial)
+summary(ctb.glm.fit1)
+```
+
+Prediction Evaluation:  
+```{r}
+ctb.glm.probs <- predict(ctb.glm.fit1, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+```
+The confusion matrix of the prediction is   
+```{r}
+tab.glm
+```
+
+**The misclassification rate is `r ctb.test.mis*100`%  **
+
+
+
+
+## With Regulation
+
+Standardize continuous variables to scale 0-1.  
+Min-Max Scaling is used.  
+```{r min-max scaling}
+train.stand <- train
+test.stand <- test
+preproc <- preProcess(train[,c(1:6)], method=c("range"))
+train.stand[,c(1:6)] <- predict(preproc, train[,c(1:6)])
+preproc <- preProcess(test[,c(1:6)], method=c("range"))
+test.stand[,c(1:6)] <- predict(preproc, test[,c(1:6)])
+rm(preproc)
 ```
 
 ```{r}
+train.x <- model.matrix(CTB~., data = train)[,-1] 
+train.y <- train$CTB
+
+glm.lasso <- glmnet(train.x, train.y)
+```
+
+```{r}
+plot(glm.lasso, xvar="lambda", label=TRUE, ylim=c(-0.2, 0.2))
+```
+
+```{r}
+length(glm.lasso$lambda)
+
+glm.lasso$lambda[5]
+```
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[10]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[15]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[20]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i]`.
+
+
+## Add Group info
+We add the group information got from GBTM multi variables model. We add the group number as a factor.  
+```{r}
+# import gbtm results saved in STATA
+gbtm.df <- read_excel("~/Desktop/trial save.xlsx", sheet="Sheet1")
 ```
 

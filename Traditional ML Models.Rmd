@@ -20,10 +20,14 @@ library(tidyverse)
 library(Hmisc)
 library(caret)
 library(glmnet)
-# library(data.table)
+library(mltools)
+library(data.table)
+library(pROC)
 # library(boot)
 # library(scales)
 # library(gridExtra)
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 ```
 
 # Model setup
@@ -35,6 +39,8 @@ gbtm.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/combined 7
 
 # df contains only the sub-cohort of patients satisfied the lab measurements criteria.
 df <- baseline.1[which(baseline.1$rID %in% gbtm.df$patients_id),]
+
+ave.last.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/last and average labs data.xlsx') %>% select(ends_with("_last"), ends_with("_average"))
 
 rm(baseline.1, gbtm.df)
 ```
@@ -59,19 +65,19 @@ binary.list <- colnames(attris.df)[-1]
 binary.list <- binary.list[(!binary.list %in% nu.list) & (!binary.list %in% labels.list)]
 attris.list <- c(nu.list, binary.list)
 
-rm(attris.df)
+variables.sum <- vector(mode="list")
+variables.sum[["binary"]] <- binary.list
+variables.sum[["numeric"]] <- nu.list
+variables.sum[["label"]] <- labels.list
+           
+rm(attris.df, binary.list, nu.list, labels.list)
 ```
-
-
 
 - The set of continuous, numeric attributes includes: `r nu.list`  
 
 - The set of binary attributes include: `r binary.list`  
 
 - The set of outcomes includes: `r labels.list[1:6]`  
-
-
-
 
 
 ### Avoid using highly correlated variables
@@ -95,10 +101,10 @@ corr.df.5 <- corr.df[which(corr.df$cor > 0.5),]
 corr.df.7 <- corr.df[which(corr.df$cor > 0.7),]
 # corr.list <- union(corr.df.7$row, corr.df.7$column)
 corr.df.5
-rm(rcor1, corr.df.5, corr.df.7)
+rm(rcor1, corr.df.5, corr.df.7, temp.df, flattenCorrMatrix, corr.df)
 ```
 
-```{r eval=FALSE}
+```{r correlation plots matrix, eval=FALSE }
 panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
 {
     usr <- par("usr"); on.exit(par(usr))
@@ -111,12 +117,12 @@ panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
 }
 corr.df <- ctb.df %>% select(corr.list)
 pairs(~., data = corr.df, lower.panel = panel.cor)
-rm(corr.list, corr.df)
+rm(corr.list, corr.df, panel.cor)
 ```
 
-Variables to remove due to high correlations:  
-CCI_CHF, CCI_COPD, CCI_DM_NO_CC
-```{r remove variables}
+Remove highly correlated variables CCI_CHF, CCI_COPD, CCI_DM_NO_CC  
+Variables removed due to high correlations (>0.7)
+```{r }
 # remove variables
 rm.attris <- c("CCI_CHF", "CCI_COPD", "CCI_DM_NO_CC")
 for (var in rm.attris){
@@ -125,7 +131,9 @@ for (var in rm.attris){
 attris.list <- attris.list[!attris.list %in% rm.attris]
 rm(rm.attris, var)
 ```
-```{r Generate set of data.frames}
+
+
+```{r Create oucomes data.frames, eval=FALSE }
 # Generate 6 dataframes based on different variable as label
 ctb.df <- df %>% select(attris.list, "CTB")
 in.ctb.df <- df %>% select(attris.list, "in_CTB")
@@ -135,53 +143,59 @@ ctb.90.df <- df %>% select(attris.list, "90_day_CTB")
 ctb.1yr.df <- df %>% select(attris.list, "1_year_CTB")
 ```
 
-### Check class bias
+### Check class imbalance
 ```{r eval=FALSE, echo=TRUE}
-table(ctb.df$CTB)
-table(in.ctb.df$in_CTB)
-table(ctb.30.df$`30_day_CTB`)
-table(ctb.60.df$`60_day_CTB`)
-table(ctb.90.df$`90_day_CTB`)
-table(ctb.1yr.df$`1_year_CTB`)
+table(ctb.df$CTB)/dim(df)[1]
+table(in.ctb.df$in_CTB)/dim(df)[1]
+table(ctb.30.df$`30_day_CTB`)/dim(df)[1]
+table(ctb.60.df$`60_day_CTB`)/dim(df)[1]
+table(ctb.90.df$`90_day_CTB`)/dim(df)[1]
+table(ctb.1yr.df$`1_year_CTB`)/dim(df)[1]
 ```
 
 
 
+## Data Splitting
+Split data into train and test sets, for reproducible results, we set seed = 123
 
+```{r train test split}
+smp_size <-  floor(0.75*nrow(ctb.df))
+set.seed(123)
+train.ind <- sample(seq_len(nrow(ctb.df)), size = smp_size)
 
+rm(smp_size)
+```
+
+There are `r nrow(train)` samples in training set, and `r nrow(test)` samples in test set. 
 
 
 
 
 # Logistic Regression
 
-*All-cause CTB as label:  *
+## Full model
 
-Split into train and test sets:  
-```{r train test split}
-smp_size <-  floor(0.75*nrow(ctb.df))
-set.seed(123)
-train.ind <- sample(seq_len(nrow(ctb.df)),size = smp_size)
+*All-cause CTB as label:  *
+```{r}
 train <- ctb.df[train.ind, ]
 test <- ctb.df[-train.ind, ]
 ```
-There are `r nrow(train)` samples in training set, and `r nrow(test)` samples in test set. 
 
-## No Regularization
-
-**Based on trials with setting small set of variables as predictors (instead of univariate model), we get the following variables have significant p-value (<0.1).**  
-AGE_ADMISSION, FEMALE, RACE_White, CCI_TOTAL_SCORE, BP_DIASTOLIC, TOBACCO_Never, INSUR_Commercial, INSUR_Medicare, DIAB_HST, COPD_HST, CAD_HST, VASCULARDISEASE_HST, CKD_HST, ESRD_HST, PRIOR_CABG, PRIOR_SMVR, CCI_RENAL_DISEASE, CCI_MI, CCI_DM_WITH_CC, CCI_PERIPHERAL_VASC, ISCHEMIC_CARDIOMYOPATHY, ASA_00, NOAC_00, APT_00, ACE_ARB_00, AAD_CLASS_I_00, INSULIN_00, METFORMIN_00
-
-**STarting with all the variables above, removing variables with p-value < 0.05 one by one. The following set of variables are statistically significant predictors at 0.05 level.**  
-AGE_ADMISSION, FEMALE, RACE_White, BP_DIASTOLIC, INSUR_Commercial, COPD_HST, PRIOR_CABG, CCI_RENAL_DISEASE, CCI_PERIPHERAL_VASC, NOAC_00, INSULIN_00, METFORMIN_00
-
-```{r}
-ctb.glm.fit1 <- glm(CTB ~ AGE_ADMISSION + RACE_White + BP_DIASTOLIC + TOBACCO_Never + INSUR_Commercial + CCI_RENAL_DISEASE + CCI_PERIPHERAL_VASC + NOAC_00 + ACE_ARB_00 + INSULIN_00, data = train, family = binomial)
-summary(ctb.glm.fit1)
+```{r eval=FALSE}
+for (i in seq(1, length(names(train))-1)){
+  # print(i)
+  # print(summary(glm(CTB ~ eval(as.name(names(train)[i])), data = train, family = binomial))$coefficient)
+}  
 ```
 
-Prediction Evaluation:  
-```{r}
+**Predictors that are associated with CTB in bivariate analysis, we get the following variables have significant p-value (<0.2 cutoff).**  
+AGE_ADMISSION, CCI_TOTAL_SCORE, BP_DIASTOLIC, FEMALE, RACE_White, TOBACCO_Never, `TOBACCO_Q/Remote`, INSUR_Commercial, INSUR_Medicaid, INSUR_Medicare, HTN_HST, HYPERLIPIDEMIA_HST, DIAB_HST, COPD_HST, CAD_HST, AFIB_HST, PH_HST, VASCULARDISEASE_HST, CKD_HST, ESRD_HST, PRIOR_SMVR, CCI_MI, CCI_PERIPHERAL_VASC, CCI_DM_WITH_CC, CCI_RENAL_DISEASE, ASA_00, NOAC_00, APT_00, ACE_ARB_00, AAD_CLASS_I_00, INSULIN_00, METFORMIN_00
+
+```{r model 1, echo=TRUE}
+ctb.glm.fit1 <- glm(CTB ~ AGE_ADMISSION + CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + `TOBACCO_Q/Remote` + INSUR_Commercial + INSUR_Medicaid + INSUR_Medicare + HTN_HST + HYPERLIPIDEMIA_HST + DIAB_HST + COPD_HST + CAD_HST + AFIB_HST + PH_HST + VASCULARDISEASE_HST + CKD_HST + ESRD_HST + PRIOR_SMVR + CCI_MI + CCI_PERIPHERAL_VASC + CCI_DM_WITH_CC + CCI_RENAL_DISEASE + ASA_00 + NOAC_00 + APT_00 + ACE_ARB_00 + AAD_CLASS_I_00 + INSULIN_00 + METFORMIN_00, data = train, family = binomial)
+summary(ctb.glm.fit1)
+
+
 ctb.glm.probs <- predict(ctb.glm.fit1, test, type="response")
 ctb.glm.pred <- rep(0, length(ctb.glm.probs))
 ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
@@ -189,47 +203,46 @@ tab.glm <- table(ctb.glm.pred, test$CTB)
 
 # Misclassification rate
 ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
 ```
-The confusion matrix of the prediction is   
+
 ```{r}
-tab.glm
+ctb.df <- ctb.df %>% select(AGE_ADMISSION, CCI_TOTAL_SCORE, BP_DIASTOLIC, FEMALE, RACE_White, TOBACCO_Never, `TOBACCO_Q/Remote`, INSUR_Commercial, INSUR_Medicaid, INSUR_Medicare, HTN_HST, HYPERLIPIDEMIA_HST, DIAB_HST, COPD_HST, CAD_HST, AFIB_HST, PH_HST, VASCULARDISEASE_HST, CKD_HST, ESRD_HST, PRIOR_SMVR, CCI_MI, CCI_PERIPHERAL_VASC, CCI_DM_WITH_CC, CCI_RENAL_DISEASE, ASA_00, NOAC_00, APT_00, ACE_ARB_00, AAD_CLASS_I_00, INSULIN_00, METFORMIN_00, CTB) 
+
+train <- ctb.df[train.ind, ]
+test <- ctb.df[-train.ind, ]
 ```
 
-**The misclassification rate is `r ctb.test.mis*100`%  **
 
-
-
-
-## With Regulation
-
+## LASSO regression
 Standardize continuous variables to scale 0-1.  
 Min-Max Scaling is used.  
 ```{r min-max scaling}
 train.stand <- train
 test.stand <- test
-preproc <- preProcess(train[,c(1:6)], method=c("range"))
+preproc <- preProcess(train[,c(1:6)], method=c("center", "scale"))
 train.stand[,c(1:6)] <- predict(preproc, train[,c(1:6)])
-preproc <- preProcess(test[,c(1:6)], method=c("range"))
+preproc <- preProcess(test[,c(1:6)], method=c("center", "scale"))
 test.stand[,c(1:6)] <- predict(preproc, test[,c(1:6)])
 rm(preproc)
 ```
 
 ```{r}
-train.x <- model.matrix(CTB~., data = train)[,-1] 
-train.y <- train$CTB
+train.x <- model.matrix(CTB~., data = train.stand)[,-1] 
+train.y <- train.stand$CTB
 
 glm.lasso <- glmnet(train.x, train.y)
+
+plot(glm.lasso, xvar="lambda", label=TRUE, ylim=c(-0.1, 0.1))
+
+rm(train.x, train.y)
 ```
 
-```{r}
-plot(glm.lasso, xvar="lambda", label=TRUE, ylim=c(-0.2, 0.2))
-```
-
-```{r}
-length(glm.lasso$lambda)
-
-glm.lasso$lambda[5]
-```
+For the lambda = `r glm.lasso$lambda[5]`: 
 There are `r length((coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i]`.  
 
 For the lambda = `r glm.lasso$lambda[10]`:  
@@ -241,11 +254,520 @@ There are `r length((coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1]
 For the lambda = `r glm.lasso$lambda[20]`:  
 There are `r length((coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i]`.
 
+We use the attributes For the lambda = `r glm.lasso$lambda[20]`:  
+```{r model 2, echo=FALSE}
+ctb.glm.fit2 <- glm(CTB ~ AGE_ADMISSION + CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + `TOBACCO_Q/Remote` + INSUR_Commercial + DIAB_HST + COPD_HST + CAD_HST + PH_HST + ESRD_HST + PRIOR_SMVR + CCI_PERIPHERAL_VASC + CCI_DM_WITH_CC + CCI_RENAL_DISEASE + NOAC_00 + APT_00 + ACE_ARB_00 + INSULIN_00 + METFORMIN_00, data = train, family = binomial)
+summary(ctb.glm.fit2)
+  
+ctb.glm.probs <- predict(ctb.glm.fit2, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+       
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
 
-## Add Group info
-We add the group information got from GBTM multi variables model. We add the group number as a factor.  
-```{r}
-# import gbtm results saved in STATA
-gbtm.df <- read_excel("~/Desktop/trial save.xlsx", sheet="Sheet1")
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
 ```
 
+
+**The misclassification rate is** `r ctb.test.mis*100`%  
+
+```{r model 3, echo=TRUE}
+ctb.glm.fit3 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never +  INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC +  NOAC_00 + INSULIN_00, data = train, family = binomial)
+summary(ctb.glm.fit3)
+
+ctb.glm.probs <- predict(ctb.glm.fit3, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+
+
+
+*30-day CTB as label:  *
+```{r}
+train <- ctb.30.df[train.ind, ]
+test <- ctb.30.df[-train.ind, ]
+```
+
+```{r}
+ctb.glm.fit6 <- glm(`30_day_CTB` ~ ., data = train, family = binomial)
+summary(ctb.glm.fit6)
+
+
+ctb.glm.probs <- predict(ctb.glm.fit6, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`30_day_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+# The confusion matrix of the prediction is   
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`30_day_CTB`))
+
+roc_obj <- pROC::roc(test$`30_day_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+*in-hospital CTB as label:  *
+```{r}
+train <- in.ctb.df[train.ind, ]
+test <- in.ctb.df[-train.ind, ]
+```
+
+```{r model 11}
+ctb.glm.fit11 <- glm(in_CTB ~ ., data = train, family = binomial)
+summary(ctb.glm.fit11)
+
+
+ctb.glm.probs <- predict(ctb.glm.fit11, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`in_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+# The confusion matrix of the prediction is   
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`in_CTB`))
+
+roc_obj <- pROC::roc(test$in_CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+ 30-day CTB
+```{r}
+train <- ctb.30.df[train.ind, ]
+test <- ctb.30.df[-train.ind, ]
+```
+
+Standardize continuous variables to scale 0-1.  
+Min-Max Scaling is used.  
+```{r min-max scaling}
+train.stand <- train
+test.stand <- test
+preproc <- preProcess(train[,c(1:6)], method=c("center", "scale"))
+train.stand[,c(1:6)] <- predict(preproc, train[,c(1:6)])
+preproc <- preProcess(test[,c(1:6)], method=c("center", "scale"))
+test.stand[,c(1:6)] <- predict(preproc, test[,c(1:6)])
+rm(preproc)
+```
+
+```{r}
+train.x <- model.matrix(`30_day_CTB`~., data = train.stand)[,-1] 
+train.y <- train.stand$`30_day_CTB`
+
+glm.lasso <- glmnet(train.x, train.y)
+
+plot(glm.lasso, xvar="lambda", label=TRUE, ylim=c(-0.2, 0.2))
+```
+
+For the lambda = `r glm.lasso$lambda[5]`: 
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[10]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[15]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[20]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[20])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[20])@i]`.
+
+```{r}
+rm(train.x, train.y)
+```
+
+
+We use the attributes For the lambda = `r glm.lasso$lambda[10]`:  
+```{r model 7, echo=FALSE}
+ctb.glm.fit7 <- glm(`30_day_CTB` ~ AGE_ADMISSION + CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + INSUR_Commercial + INSUR_Medicare + COPD_HST + CAD_HST + ESRD_HST + PRIOR_ENDO_AO_GRFT + PRIOR_STVR + CCI_PERIPHERAL_VASC + CCI_CEREBROVASCULAR + CCI_RENAL_DISEASE + BB_00 + ACE_ARB_00 +  METFORMIN_00, data = train, family = binomial)
+summary(ctb.glm.fit7)
+
+ctb.glm.probs <- predict(ctb.glm.fit7, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`30_day_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`30_day_CTB`))
+
+roc_obj <- pROC::roc(test$`30_day_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+
+```{r model 8, echo=FALSE}
+ctb.glm.fit8 <- glm(`30_day_CTB` ~ CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + INSUR_Commercial  + COPD_HST + ESRD_HST + CCI_PERIPHERAL_VASC + CCI_CEREBROVASCULAR  + BB_00 + ACE_ARB_00 +  METFORMIN_00, data = train, family = binomial)
+summary(ctb.glm.fit8)
+
+ctb.glm.probs <- predict(ctb.glm.fit8, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`30_day_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`30_day_CTB`))
+
+roc_obj <- pROC::roc(test$`30_day_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+ in-hospital CTB
+
+```{r}
+train <- in.ctb.df[train.ind, ]
+test <- in.ctb.df[-train.ind, ]
+```
+
+Standardize continuous variables to scale 0-1.  
+Min-Max Scaling is used.  
+```{r min-max scaling}
+train.stand <- train
+test.stand <- test
+preproc <- preProcess(train[,c(1:6)], method=c("center", "scale"))
+train.stand[,c(1:6)] <- predict(preproc, train[,c(1:6)])
+preproc <- preProcess(test[,c(1:6)], method=c("center", "scale"))
+test.stand[,c(1:6)] <- predict(preproc, test[,c(1:6)])
+rm(preproc)
+```
+
+```{r}
+train.x <- model.matrix(`in_CTB`~., data = train.stand)[,-1] 
+train.y <- train.stand$`in_CTB`
+
+glm.lasso <- glmnet(train.x, train.y)
+
+plot(glm.lasso, xvar="lambda", label=TRUE, ylim=c(-0.1, 0.1))
+```
+
+For the lambda = `r glm.lasso$lambda[3]`: 
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[5])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[5])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[3])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[3])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[10]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[10])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[10])@i]`.  
+
+For the lambda = `r glm.lasso$lambda[15]`:  
+There are `r length((coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i])` variables that have non-zero coefficients in the model . Namely, they are `r (coef(glm.lasso, s = glm.lasso$lambda[15])@Dimnames[[1]][-1])[coef(glm.lasso, s = glm.lasso$lambda[15])@i]`.  
+
+```{r}
+rm(train.x, train.y)
+```
+
+
+We use the attributes For the lambda = `r glm.lasso$lambda[10]`:  
+```{r model 12, echo=FALSE}
+ctb.glm.fit12 <- glm(`in_CTB` ~ CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + CKD_HST + CAD_HST + CIRRHOSIS_HST+ PRIOR_ENDO_AO_GRFT + PRIOR_STVR + CCI_MI + ACE_ARB_00 , data = train, family = binomial)
+summary(ctb.glm.fit12)
+
+ctb.glm.probs <- predict(ctb.glm.fit12, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`in_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`in_CTB`))
+
+roc_obj <- pROC::roc(test$`in_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+## Add Last lab reading
+```{r}
+ctb.last.ave.df <- cbind(ctb.df, ave.last.df)
+train <- ctb.last.ave.df[train.ind, ]
+test <- ctb.last.ave.df[-train.ind, ]
+```
+
+```{r}
+ctb.glm.fit14 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + EGFR_last + N_A_last, data = train, family = binomial)
+summary(ctb.glm.fit14)
+
+ctb.glm.probs <- predict(ctb.glm.fit14, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+## Add Group info
+We add the group information got from GBTM multi variables model into the logistic regression (LASSO regulariation). We add the group number as a factor.  
+
+### ALL-CAUSE CTB
+```{r}
+#  initialize ctb dataframe with group info
+ctb.gr.df <- ctb.df
+```
+
+```{r}
+ctb.gr.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/ctb_w_groupinfo.xlsx', sheet="Sheet 1")
+```
+
+
+```{r}
+# import gbtm results saved in STATA
+lab.gbtm.df <- readxl::read_excel("~/Desktop/trial save.xlsx", sheet="Sheet1")
+
+# add the group number as a variable in the ctb.df
+ctb.gr.df <- cbind(ctb.gr.df, factor(lab.gbtm.df$`_traj_Group`))
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_hgb"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_wbc"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_k"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_na"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_platelets"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_glucose"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group4_k"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group4_multivar"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar_sig"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_hgb2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_k2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_wbc2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_na2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_k_wbc"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na_2"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_wbc_hgb"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar_glucose"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar3"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar4"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar5"
+# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar6"
+
+names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_3"
+```
+
+group_multivar3: 4 labs multivariate model with HGB, EGFR, NA, WBC
+group_multivar4: 5 labs multivariate model with HGB, EGFR, NA, K, WBC 
+group_multivar5: 4 labs multivariate model without HGB, EGFR, NA, K 
+group_multivar6: 3 labs multivatiate model with HGB, EGFR, NA
+
+```{r}
+temp.df <- ctb.gr.df %>% select(starts_with("group_"))
+rcor1 <- rcorr(as.matrix(temp.df))
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+corr.df <- flattenCorrMatrix(rcor1$r, rcor1$P)
+
+corr.df.7 <- corr.df[which(corr.df$cor > 0.7),]
+corr.df.7
+rm(temp.df, rcor1, flattenCorrMatrix, corr.df, corr.df.7)
+```
+
+
+
+```{r}
+combined.ctb.gr.df <- cbind(ctb.gr.df, ave.last.df)
+train <- combined.ctb.gr.df[train.ind, ]
+test <- combined.ctb.gr.df[-train.ind, ]
+```
+
+```{r}
+ctb.gr.df[,which(names(ctb.gr.df) == "group_egfr_3")] <- NULL
+```
+
+
+```{r save the group info for each labs}
+write.xlsx(ctb.gr.df, '~/Desktop/datasets/processed/GBTM_data/ctb_w_groupinfo.xlsx', col.names = TRUE, row.names = FALSE)
+write.xlsx(combined.ctb.gr.df, '~/Desktop/datasets/processed/GBTM_data/ctb_w_groupinfo_lastave.xlsx', col.names = TRUE, row.names = FALSE)
+```
+
+```{r}
+# ggplot(data = ctb.gr.df) + geom_bar(mapping = aes(fill = group_egfr_na, x = `CTB`))
+```
+
+
+```{r model 4, echo=TRUE}
+ctb.glm.fit4 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC +  NOAC_00 + INSULIN_00 + group_egfr + group_na, data = train, family = binomial)
+summary(ctb.glm.fit4)
+
+ctb.glm.probs <- predict(ctb.glm.fit4, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+```{r model 5, echo=TRUE}
+ctb.glm.fit5 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr + group_na + EGFR_last + EGFR_average, data = train, family = binomial)
+summary(ctb.glm.fit5)
+
+ctb.glm.probs <- predict(ctb.glm.fit5, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+```{r model 6, echo=TRUE }
+ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr, data = train, family = binomial)
+summary(ctb.glm.fit6)
+
+ctb.glm.probs <- predict(ctb.glm.fit6, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+```{r}
+ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00  + group_egfr + group_na + EGFR_average + EGFR_last, data = train, family = binomial)
+summary(ctb.glm.fit6)
+
+ctb.glm.probs <- predict(ctb.glm.fit6, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+### 30-day CTB
+
+```{r}
+ctb.30.gr.df <- cbind(ctb.gr.df, ctb.30.df$`30_day_CTB`)
+names(ctb.30.gr.df)[names(ctb.30.gr.df) == "ctb.30.df$`30_day_CTB`"] <- "30_day_CTB"
+```
+
+```{r}
+train <- ctb.30.gr.df[train.ind, ]
+test <- ctb.30.gr.df[-train.ind, ]
+```
+
+```{r model 9, echo=TRUE}
+ctb.glm.fit9 <- glm(`30_day_CTB` ~ CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + INSUR_Commercial  + COPD_HST + ESRD_HST + CCI_PERIPHERAL_VASC + CCI_CEREBROVASCULAR  + BB_00 + ACE_ARB_00 +  METFORMIN_00 + group_wbc + group_k + group_na + group_hgb + group_egfr + group_platelets, data = train, family = binomial)
+summary(ctb.glm.fit9)
+
+ctb.glm.probs <- predict(ctb.glm.fit9, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`30_day_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`30_day_CTB`))
+
+roc_obj <- pROC::roc(test$`30_day_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+
+### in-hospital CTB
+```{r}
+ctb.in.gr.df <- cbind(ctb.gr.df, in.ctb.df$in_CTB)
+names(ctb.in.gr.df)[names(ctb.in.gr.df) == "in.ctb.df$in_CTB"] <- "in_CTB"
+```
+
+```{r}
+train <- ctb.in.gr.df[train.ind, ]
+test <- ctb.in.gr.df[-train.ind, ]
+```
+
+```{r model 13, echo=TRUE}
+ctb.glm.fit13 <- glm(`in_CTB` ~ CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + CKD_HST + CAD_HST + CIRRHOSIS_HST+ PRIOR_ENDO_AO_GRFT + PRIOR_STVR + CCI_MI + ACE_ARB_00 + group_wbc + group_hgb + group_k + group_na + group_platelets, data = train, family = binomial)
+summary(ctb.glm.fit13)
+
+ctb.glm.probs <- predict(ctb.glm.fit13, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`in_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`in_CTB`))
+
+roc_obj <- pROC::roc(test$`in_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```
+
+```{r model 14, echo=TRUE}
+ctb.glm.fit14 <- glm(`in_CTB` ~ CCI_TOTAL_SCORE + BP_DIASTOLIC + FEMALE + CKD_HST + CAD_HST + CIRRHOSIS_HST+ PRIOR_ENDO_AO_GRFT + PRIOR_STVR + CCI_MI + ACE_ARB_00 + group_multivar, data = train, family = binomial)
+summary(ctb.glm.fit14)
+
+ctb.glm.probs <- predict(ctb.glm.fit14, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$`in_CTB`)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`in_CTB`))
+
+roc_obj <- pROC::roc(test$`in_CTB`, ctb.glm.pred)
+auc(roc_obj)
+```

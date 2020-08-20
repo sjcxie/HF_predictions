@@ -1,0 +1,178 @@
+---
+title: "HF_LR_Prediction"
+author: "Jinchen Xie"
+date: "08/17/2020"
+output: 
+  html_document:
+    theme: cerulean
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+library(knitr)
+library(tidyverse)
+library(Hmisc)
+library(caret)
+library(glmnet)
+library(mltools)
+library(data.table)
+library(pROC)
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+# Import data
+```{r}
+ctb.df <- readxl::read_excel("~/Desktop/datasets/processed/prediction_data/ctb_preprocessed.xlsx")
+```
+
+# Turn group info into one-hot encoding
+```{r}
+df.group <- ctb.df %>% select(starts_with("group_"))
+dmy <- dummyVars(" ~ .", data = df.group)
+df.group.hot <- data.frame(predict(dmy, newdata = df.group))
+
+ctb.df <- ctb.df %>% select(-starts_with("group_")) %>%  cbind(df.group.hot)
+```
+
+# Data Splitting
+Split data into train and test sets, for reproducible results, we set seed = 123
+
+```{r train index}
+smp_size <-  floor(0.75*nrow(ctb.df))
+set.seed(123)
+train.ind <- sample(seq_len(nrow(ctb.df)), size = smp_size)
+
+rm(smp_size)
+```
+
+
+
+```{r train test split}
+train <- ctb.df[train.ind, ]
+test <- ctb.df[-train.ind, ]
+```
+
+
+There are `r nrow(train)` samples in training set, and `r nrow(test)` samples in test set. 
+
+# LASSO
+
+> For the Lasso problems below, it's helpful to review the code examples in the [Linear regression with glmnet](https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html#lin) vignette. 
+
+
+## examine standardization
+```{r eval=FALSE}
+cont.train <- train[,which(lapply(train, max) != 1)]
+cont.train[] <- mutate_if(cont.train, is.character, factor)
+
+# str(cont.train)
+cont.train.z <-  apply(cont.train, 2, scale)
+summary(cont.train.z)
+```
+
+```{r eval=FALSE}
+rm(cont.train, cont.train.z)
+```
+
+
+
+
+
+## model selection
+
+```{r}
+train.x <- train[,-which(names(train)=='CTB')]
+train.y <- train$CTB
+
+
+test.x <- test[,-which(names(test)=='CTB')]
+test.y <- test$CTB
+```
+
+```{r}
+ctb.lasso <- glmnet(x = data.matrix(train.x), y = train.y, alpha = 1, family = "binomial", standardize = TRUE)
+plot(ctb.lasso, xvar="norm", label=TRUE, ylim=c(-0.2, 0.2), xlim=c(0,5))
+```
+
+
+*10-fold cross validation fit by glmnet(x,y)*
+```{r}
+ctb.lasso.cv <- cv.glmnet(data.matrix(train.x), train.y, alpha = 1, family = "binomial", standarize = TRUE, standardize.response = FALSE)
+plot(ctb.lasso.cv)
+```
+
+```{r}
+# lambda of minimum binomial deviance 
+cat("min lambda:", ctb.lasso.cv$lambda.min, "\n")
+# lambda within 1-SE of minimum deviance
+cat("1-SE rule lambda:", ctb.lasso.cv$lambda.1se, "\n\n")
+
+# cv errors of using 2 lambdas respectively
+cat("min lambda error:", ctb.lasso.cv$cvm[which(ctb.lasso.cv$lambda==ctb.lasso.cv$lambda.min)], "\n")   
+cat("1-SE rule lambda error:", ctb.lasso.cv$cvm[which(ctb.lasso.cv$lambda==ctb.lasso.cv$lambda.1se)])
+```
+
+**Variables selected if using minimum cv error lambda:**
+```{r}
+var.min <- (coef(ctb.lasso.cv, s = "lambda.min")@Dimnames[[1]][-1])[coef(ctb.lasso.cv, s = "lambda.min")@i]
+length(var.min)
+var.min
+```
+
+**Variables selected if using 1-SE rule cv error lambda:**
+```{r}
+var.1se <- (coef(ctb.lasso.cv, s = "lambda.min")@Dimnames[[1]][-1])[coef(ctb.lasso.cv, s = "lambda.1se")@i]
+length(var.1se)
+var.1se
+```
+
+## model fit
+
+*Model using minimum cv error lambda:*  
+```{r}
+min.coef <- coef(ctb.lasso.cv, s = ctb.lasso.cv$lambda.min)
+
+min.coef <- data.frame(
+  features = min.coef@Dimnames[[1]][ which(min.coef != 0 ) ], #intercept included
+  coefs    = min.coef              [ which(min.coef != 0 ) ]  #intercept included
+)
+print.data.frame(min.coef)
+
+ctb.glmnet.probs <- predict(ctb.lasso.cv, data.matrix(test.x), s = ctb.lasso.cv$lambda.min, type = "response")
+ctb.glmnet.pred <- rep(0, length(ctb.glmnet.probs))
+ctb.glmnet.pred[ctb.glmnet.probs > 0.5] <- 1
+
+confusionMatrix(data = factor(ctb.glmnet.pred), reference = factor(test$CTB), positive = '1')
+roc_obj <- pROC::roc(response = test$CTB, predictor = ctb.glmnet.pred)
+auc(roc_obj)
+```
+
+*Model using 1-SE cv error lambda:*  
+```{r}
+one.se.coef <- coef(ctb.lasso.cv, s = ctb.lasso.cv$lambda.1se)
+
+one.se.coef <- data.frame(
+  features = one.se.coef@Dimnames[[1]][ which(one.se.coef != 0 ) ], 
+  coefs    = one.se.coef              [ which(one.se.coef != 0 ) ]  
+)
+print.data.frame(one.se.coef)
+
+ctb.glmnet.probs <- predict(ctb.lasso.cv, data.matrix(test.x), s = ctb.lasso.cv$lambda.1se, type = "response")
+ctb.glmnet.pred <- rep(0, length(ctb.glmnet.probs))
+ctb.glmnet.pred[ctb.glmnet.probs > 0.5] <- 1
+
+confusionMatrix(data = factor(ctb.glmnet.pred), reference = factor(test$CTB), positive = '1')
+roc_obj <- pROC::roc(response = test$CTB, predictor = ctb.glmnet.pred)
+auc(roc_obj)
+```
+
+
+
+
+

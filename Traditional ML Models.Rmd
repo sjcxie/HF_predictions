@@ -40,8 +40,6 @@ gbtm.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/combined 7
 # df contains only the sub-cohort of patients satisfied the lab measurements criteria.
 df <- baseline.1[which(baseline.1$rID %in% gbtm.df$patients_id),]
 
-ave.last.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/last and average labs data.xlsx') %>% select(ends_with("_last"), ends_with("_average"))
-
 rm(baseline.1, gbtm.df)
 ```
 
@@ -122,7 +120,7 @@ rm(corr.list, corr.df, panel.cor)
 
 Remove highly correlated variables CCI_CHF, CCI_COPD, CCI_DM_NO_CC  
 Variables removed due to high correlations (>0.7)
-```{r }
+```{r remove correlated variables}
 # remove variables
 rm.attris <- c("CCI_CHF", "CCI_COPD", "CCI_DM_NO_CC")
 for (var in rm.attris){
@@ -155,6 +153,7 @@ table(ctb.1yr.df$`1_year_CTB`)/dim(df)[1]
 
 
 
+
 ## Data Splitting
 Split data into train and test sets, for reproducible results, we set seed = 123
 
@@ -182,7 +181,7 @@ test <- ctb.df[-train.ind, ]
 ```
 
 ```{r eval=FALSE}
-for (i in seq(1, length(names(train))-1)){
+# for (i in seq(1, length(names(train))-1)){
   # print(i)
   # print(summary(glm(CTB ~ eval(as.name(names(train)[i])), data = train, family = binomial))$coefficient)
 }  
@@ -498,9 +497,9 @@ auc(roc_obj)
 
 ## Add Last lab reading
 ```{r}
-ctb.last.ave.df <- cbind(ctb.df, ave.last.df)
-train <- ctb.last.ave.df[train.ind, ]
-test <- ctb.last.ave.df[-train.ind, ]
+ctb.labs.df <- cbind(ctb.df, ave.last.df)
+train <- ctb.labs.df[train.ind, ]
+test <- ctb.labs.df[-train.ind, ]
 ```
 
 ```{r}
@@ -549,33 +548,14 @@ ctb.gr.df <- cbind(ctb.gr.df, factor(lab.gbtm.df$`_traj_Group`))
 # names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_na"
 # names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_platelets"
 # names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_glucose"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group4_k"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group4_multivar"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar_sig"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_hgb2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_k2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_wbc2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_na2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_k_wbc"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_na_2"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_wbc_hgb"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar_glucose"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar3"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar4"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar5"
-# names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar6"
-
-names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_egfr_3"
+names(ctb.gr.df)[names(ctb.gr.df) == "factor(lab.gbtm.df$`_traj_Group`)"] <- "group_multivar"
 ```
 
 group_multivar3: 4 labs multivariate model with HGB, EGFR, NA, WBC
 group_multivar4: 5 labs multivariate model with HGB, EGFR, NA, K, WBC 
 group_multivar5: 4 labs multivariate model without HGB, EGFR, NA, K 
 group_multivar6: 3 labs multivatiate model with HGB, EGFR, NA
+group_multivar7: 6 labs multivatiate model with all significant baseline covariates and time-varying covariates POST_VAD
 
 ```{r}
 temp.df <- ctb.gr.df %>% select(starts_with("group_"))
@@ -599,7 +579,18 @@ rm(temp.df, rcor1, flattenCorrMatrix, corr.df, corr.df.7)
 
 
 ```{r}
+xtabs(~ group_egfr + group_na, ctb.gr.df)
+```
+
+
+
+
+```{r}
+ave.last.df <- readxl::read_excel('~/Desktop/datasets/processed/GBTM_data/last and average labs data.xlsx') %>% select(ends_with("_last"), ends_with("_average"), ends_with("_min"), ends_with("_max"), ends_with("_sd"))
+
 combined.ctb.gr.df <- cbind(ctb.gr.df, ave.last.df)
+
+
 train <- combined.ctb.gr.df[train.ind, ]
 test <- combined.ctb.gr.df[-train.ind, ]
 ```
@@ -610,7 +601,11 @@ ctb.gr.df[,which(names(ctb.gr.df) == "group_egfr_3")] <- NULL
 
 
 ```{r save the group info for each labs}
+openxlsx::write.xlsx(combined.ctb.gr.df, "~/Desktop/datasets/processed/prediction_data/ctb_preprocessed.xlsx", col.names = TRUE, row.names = FALSE)
+
+
 write.xlsx(ctb.gr.df, '~/Desktop/datasets/processed/GBTM_data/ctb_w_groupinfo.xlsx', col.names = TRUE, row.names = FALSE)
+
 write.xlsx(combined.ctb.gr.df, '~/Desktop/datasets/processed/GBTM_data/ctb_w_groupinfo_lastave.xlsx', col.names = TRUE, row.names = FALSE)
 ```
 
@@ -634,7 +629,7 @@ ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
 confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
 
 
-roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+roc_obj <- pROC::roc(response = test$CTB, predictor = ctb.glm.pred)
 auc(roc_obj)
 ```
 
@@ -658,7 +653,7 @@ auc(roc_obj)
 ```
 
 ```{r model 6, echo=TRUE }
-ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr, data = train, family = binomial)
+ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr + group_na + EGFR_last + EGFR_average, data = train, family = binomial)
 summary(ctb.glm.fit6)
 
 ctb.glm.probs <- predict(ctb.glm.fit6, test, type="response")
@@ -675,8 +670,26 @@ roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
 auc(roc_obj)
 ```
 
+```{r model 7, echo=TRUE }
+ctb.glm.fit7 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr_na, data = train, family = binomial)
+summary(ctb.glm.fit7)
+
+ctb.glm.probs <- predict(ctb.glm.fit7, test, type="response")
+ctb.glm.pred <- rep(0, length(ctb.glm.probs))
+ctb.glm.pred[ctb.glm.probs > 0.5] <- 1
+tab.glm <- table(ctb.glm.pred, test$CTB)
+
+# Misclassification rate
+ctb.test.mis <- sum(tab.glm[row(tab.glm)!=col(tab.glm)])/nrow(test)
+
+confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$CTB))
+
+roc_obj <- pROC::roc(test$CTB, ctb.glm.pred)
+auc(roc_obj)
+```
+
 ```{r}
-ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00  + group_egfr + group_na + EGFR_average + EGFR_last, data = train, family = binomial)
+ctb.glm.fit6 <- glm(CTB ~ AGE_ADMISSION + BP_DIASTOLIC + FEMALE + RACE_White + TOBACCO_Never + INSUR_Commercial + COPD_HST + CCI_PERIPHERAL_VASC + NOAC_00 + INSULIN_00 + group_egfr + group_na, data = train, family = binomial)
 summary(ctb.glm.fit6)
 
 ctb.glm.probs <- predict(ctb.glm.fit6, test, type="response")
@@ -771,3 +784,18 @@ confusionMatrix(data = factor(ctb.glm.pred), reference = factor(test$`in_CTB`))
 roc_obj <- pROC::roc(test$`in_CTB`, ctb.glm.pred)
 auc(roc_obj)
 ```
+
+
+# Distal outcome model
+
+```{r}
+gbtm.outcome.df <- readxl::read_excel("~/Desktop/trial save.xlsx", sheet="Sheet1")
+gbtm.outcome <- gbtm.outcome.df[-train.ind, ]$`_traj_Outcome`
+gbtm.pred <- rep(0, length(gbtm.outcome))
+gbtm.pred[gbtm.outcome > 0.5] <- 1
+tab.gbtm <- table(gbtm.pred, test$`CTB`)
+confusionMatrix(data = factor(gbtm.pred), reference = factor(test$CTB))
+roc_obj <- pROC::roc(test$CTB, gbtm.pred)
+auc(roc_obj)
+```
+
